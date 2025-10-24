@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Speaker Duplicate Detector - CSV/Excel Input</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <div class="container">
+        <h1>🎤 Speaker Duplicate Detector</h1>
+        <p class="subtitle">Upload CSV/Excel with audio URLs to detect duplicate speakers</p>
+        
+        <div class="info-box">
+            <h3>📋 Sheet Format Requirements</h3>
+            <ul>
+                <li>Must contain a column with audio URLs (column name should include: "url", "link", "audio", or "file")</li>
+                <li>Optional: Label/ID column (column name should include: "label", "name", "id", or "speaker")</li>
+                <li>Supported formats: CSV, XLSX, XLS</li>
+                <li>Audio formats: WAV, MP3, FLAC, OGG, M4A</li>
+            </ul>
+        </div>
+        
+        <div class="upload-section">
+            <input type="file" id="sheetInput" accept=".csv,.xlsx,.xls" style="display: none;">
+            <button onclick="document.getElementById('sheetInput').click()" class="btn btn-primary">
+                📁 Select CSV/Excel File
+            </button>
+            <div id="sheetInfo" class="sheet-info"></div>
+        </div>
+        
+        <div class="method-section">
+            <h3>🔬 Detection Method</h3>
+            <div class="method-toggle">
+                <label class="method-option">
+                    <input type="radio" name="method" value="resemblyzer" checked>
+                    <div class="method-card">
+                        <h4>🟢 Resemblyzer</h4>
+                        <p>Open-source, no API key required</p>
+                        <p class="method-detail">Fast, runs on CPU, good accuracy</p>
+                    </div>
+                </label>
+                <label class="method-option">
+                    <input type="radio" name="method" value="pyannote">
+                    <div class="method-card">
+                        <h4>🔵 Pyannote</h4>
+                        <p>Premium, requires API key</p>
+                        <p class="method-detail">State-of-the-art, 90%+ accuracy</p>
+                        <p class="method-detail" style="color: #48bb78;">✨ Best for short audio + same script</p>
+                    </div>
+                </label>
+            </div>
+        </div>
+        
+        <div class="threshold-section">
+            <label for="threshold">Similarity Threshold: <span id="thresholdValue">0.25</span></label>
+            <input type="range" id="threshold" min="0.15" max="0.50" step="0.05" value="0.25">
+            <p class="help-text">Lower = stricter matching (fewer duplicates), Higher = more lenient (more duplicates)</p>
+            <p class="help-text" style="color: #667eea; font-weight: 600;">💡 Recommended: 0.30-0.35 for same script scenarios</p>
+        </div>
+        
+        <button id="analyzeBtn" class="btn btn-success" disabled>🔍 Analyze for Duplicates</button>
+        
+        <div id="loading" class="loading" style="display: none;">
+            <div class="spinner"></div>
+            <p>Processing audio samples from URLs...</p>
+            <p class="loading-note">⚠️ No files are stored on server - all processing in memory</p>
+        </div>
+        
+        <div id="results" class="results"></div>
+    </div>
+    
+    <script src="{{ url_for('static', filename='script.js') }}"></script>
+</body>
+</html>
