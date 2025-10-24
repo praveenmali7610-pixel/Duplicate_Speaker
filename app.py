@@ -15,19 +15,10 @@ app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50MB max for CSV
 app.config['ALLOWED_SHEET_EXTENSIONS'] = {'csv', 'xlsx', 'xls'}
 
 # Lazy loading for encoders
-resemblyzer_encoder = None
 pyannote_pipeline = None
 
 # Environment variables
 PYANNOTE_API_KEY = os.environ.get('PYANNOTE_API_KEY', None)
-
-def get_resemblyzer_encoder():
-    """Lazy load Resemblyzer encoder"""
-    global resemblyzer_encoder
-    if resemblyzer_encoder is None:
-        from resemblyzer import VoiceEncoder
-        resemblyzer_encoder = VoiceEncoder()
-    return resemblyzer_encoder
 
 def get_pyannote_pipeline():
     """Lazy load Pyannote pipeline"""
@@ -89,23 +80,6 @@ def process_audio_in_memory(audio_buffer, target_sr=16000):
         print(f"Error processing audio: {str(e)}")
         return None
 
-def extract_embedding_resemblyzer_memory(audio_array):
-    """Extract speaker embedding using Resemblyzer from numpy array"""
-    try:
-        from resemblyzer import preprocess_wav
-        
-        # Preprocess audio array
-        wav_preprocessed = preprocess_wav(audio_array)
-        
-        # Get encoder and extract embedding
-        encoder = get_resemblyzer_encoder()
-        embedding = encoder.embed_utterance(wav_preprocessed)
-        
-        return embedding
-    except Exception as e:
-        print(f"Error extracting Resemblyzer embedding: {str(e)}")
-        return None
-
 def extract_embedding_pyannote_memory(audio_buffer):
     """Extract speaker embedding using Pyannote from memory buffer"""
     try:
@@ -154,15 +128,14 @@ def process_sheet_file(file):
         print(f"Error reading sheet: {str(e)}")
         return None
 
-def find_duplicates_from_urls(audio_urls, labels, method='resemblyzer', threshold=0.25):
+def find_duplicates_from_urls(audio_urls, labels, threshold=0.30):
     """
-    Find duplicate speakers from audio URLs (no disk storage)
+    Find duplicate speakers from audio URLs using Pyannote (no disk storage)
     
     Args:
         audio_urls: List of audio file URLs
         labels: List of labels/identifiers for each audio
-        method: 'resemblyzer' or 'pyannote'
-        threshold: Similarity threshold
+        threshold: Similarity threshold (default 0.30 for same-script scenarios)
     """
     results = []
     embeddings = []
@@ -184,15 +157,8 @@ def find_duplicates_from_urls(audio_urls, labels, method='resemblyzer', threshol
             })
             continue
         
-        # Extract embedding based on method
-        if method.lower() == 'pyannote':
-            embedding = extract_embedding_pyannote_memory(audio_buffer)
-        else:  # resemblyzer
-            audio_array = process_audio_in_memory(audio_buffer)
-            if audio_array is not None:
-                embedding = extract_embedding_resemblyzer_memory(audio_array)
-            else:
-                embedding = None
+        # Extract embedding using Pyannote
+        embedding = extract_embedding_pyannote_memory(audio_buffer)
         
         # Clear memory buffer
         audio_buffer.close()
@@ -252,7 +218,7 @@ def find_duplicates_from_urls(audio_urls, labels, method='resemblyzer', threshol
         'unique_speakers': unique_speakers,
         'duplicate_groups': duplicate_groups,
         'all_comparisons': sorted(all_comparisons, key=lambda x: x['similarity'], reverse=True),
-        'method': method.capitalize(),
+        'method': 'Pyannote',
         'threshold': threshold,
         'errors': [e for e in embeddings if e['error'] is not None]
     }
@@ -325,13 +291,12 @@ def upload_sheet():
 
 @app.route('/analyze-from-sheet', methods=['POST'])
 def analyze_from_sheet():
-    """Analyze audio from sheet URLs (no disk storage)"""
+    """Analyze audio from sheet URLs using Pyannote (no disk storage)"""
     if 'sheet_file' not in request.files:
         return jsonify({'error': 'No file uploaded'}), 400
     
     file = request.files['sheet_file']
-    method = request.form.get('method', 'resemblyzer').lower()
-    threshold = float(request.form.get('threshold', 0.25))
+    threshold = float(request.form.get('threshold', 0.30))
     
     # Read sheet
     df = process_sheet_file(file)
@@ -362,13 +327,13 @@ def analyze_from_sheet():
     if len(audio_urls) < 2:
         return jsonify({'error': 'At least 2 audio URLs required for comparison'}), 400
     
-    # Validate method
-    if method == 'pyannote' and not PYANNOTE_API_KEY:
-        return jsonify({'error': 'Pyannote API key not configured. Use Resemblyzer or add API key.'}), 400
+    # Validate Pyannote API key
+    if not PYANNOTE_API_KEY:
+        return jsonify({'error': 'Pyannote API key not configured in environment variables'}), 400
     
     try:
         # Process all audio (in-memory only)
-        results = find_duplicates_from_urls(audio_urls, labels, method, threshold)
+        results = find_duplicates_from_urls(audio_urls, labels, threshold)
         return jsonify(results)
     except Exception as e:
         return jsonify({'error': str(e)}), 500
