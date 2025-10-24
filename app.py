@@ -1,5 +1,4 @@
 from flask import Flask, render_template, request, jsonify
-from werkzeug.utils import secure_filename
 import os
 import io
 import requests
@@ -8,45 +7,26 @@ import numpy as np
 from scipy.spatial.distance import cosine
 import librosa
 import soundfile as sf
-from datetime import datetime
 
 app = Flask(__name__)
-app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50MB max for CSV
+app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024
 app.config['ALLOWED_SHEET_EXTENSIONS'] = {'csv', 'xlsx', 'xls'}
-
-# Lazy loading for encoders
-pyannote_pipeline = None
 
 # Environment variables
 PYANNOTE_API_KEY = os.environ.get('PYANNOTE_API_KEY', None)
 
-def get_pyannote_pipeline():
-    """Lazy load Pyannote pipeline"""
-    global pyannote_pipeline
-    if pyannote_pipeline is None:
-        if not PYANNOTE_API_KEY:
-            raise ValueError("Pyannote API key not configured")
-        from pyannote.audio import Inference
-        pyannote_pipeline = Inference(
-            "pyannote/embedding",
-            use_auth_token=PYANNOTE_API_KEY
-        )
-    return pyannote_pipeline
+# Pyannote.ai official API endpoints
+PYANNOTE_EMBEDDING_URL = "https://api.pyannote.ai/v1/embedding"
 
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in app.config['ALLOWED_SHEET_EXTENSIONS']
 
 def download_audio_to_memory(url, timeout=30):
-    """
-    Download audio from URL directly to memory without saving to disk
-    Returns: BytesIO object containing audio data
-    """
+    """Download audio from URL to memory"""
     try:
-        # Stream download to avoid loading entire file at once
         response = requests.get(url, stream=True, timeout=timeout)
         response.raise_for_status()
         
-        # Store in memory buffer
         audio_buffer = io.BytesIO()
         for chunk in response.iter_content(chunk_size=8192):
             if chunk:
@@ -59,19 +39,13 @@ def download_audio_to_memory(url, timeout=30):
         return None
 
 def process_audio_in_memory(audio_buffer, target_sr=16000):
-    """
-    Process audio from memory buffer without writing to disk
-    Returns: numpy array of audio samples
-    """
+    """Process audio from memory buffer"""
     try:
-        # Load audio from memory buffer using soundfile
         audio_data, sr = sf.read(audio_buffer)
         
-        # Convert to mono if stereo
         if len(audio_data.shape) > 1:
             audio_data = np.mean(audio_data, axis=1)
         
-        # Resample if needed
         if sr != target_sr:
             audio_data = librosa.resample(audio_data, orig_sr=sr, target_sr=target_sr)
         
@@ -80,39 +54,97 @@ def process_audio_in_memory(audio_buffer, target_sr=16000):
         print(f"Error processing audio: {str(e)}")
         return None
 
-def extract_embedding_pyannote_memory(audio_buffer):
-    """Extract speaker embedding using Pyannote from memory buffer"""
+def save_audio_buffer_as_wav(audio_buffer):
+    """Convert audio buffer to WAV format in memory"""
     try:
-        import tempfile
+        # Read audio
+        audio_data, sr = sf.read(audio_buffer)
         
-        # Get pipeline
-        model = get_pyannote_pipeline()
+        # Convert to mono if needed
+        if len(audio_data.shape) > 1:
+            audio_data = np.mean(audio_data, axis=1)
         
-        # Pyannote requires file path, use temporary file
-        with tempfile.NamedTemporaryFile(suffix='.wav', delete=True) as tmp_file:
-            audio_buffer.seek(0)
-            tmp_file.write(audio_buffer.read())
-            tmp_file.flush()
-            
-            # Extract embedding
-            embedding = model(tmp_file.name)
-            
-            # Average if multiple segments
-            if len(embedding.shape) > 1:
-                embedding = np.mean(embedding, axis=0)
-            
-            # File automatically deleted when exiting with block
-            return embedding
+        # Create new WAV buffer
+        wav_buffer = io.BytesIO()
+        sf.write(wav_buffer, audio_data, sr, format='WAV')
+        wav_buffer.seek(0)
+        
+        return wav_buffer
     except Exception as e:
-        print(f"Error extracting Pyannote embedding: {str(e)}")
+        print(f"Error converting to WAV: {str(e)}")
+        return None
+
+def extract_embedding_pyannote_api(audio_buffer):
+    """Extract embedding using official Pyannote.ai API"""
+    try:
+        if not PYANNOTE_API_KEY:
+            raise ValueError("Pyannote API key not configured")
+        
+        # Convert to WAV format
+        wav_buffer = save_audio_buffer_as_wav(audio_buffer)
+        if wav_buffer is None:
+            return None
+        
+        # Prepare request
+        headers = {
+            "Authorization": f"Bearer {PYANNOTE_API_KEY}"
+        }
+        
+        files = {
+            'audio': ('audio.wav', wav_buffer, 'audio/wav')
+        }
+        
+        # Call Pyannote API
+        response = requests.post(
+            PYANNOTE_EMBEDDING_URL,
+            headers=headers,
+            files=files,
+            timeout=60
+        )
+        
+        wav_buffer.close()
+        
+        if response.status_code == 200:
+            result = response.json()
+            
+            # Extract embedding from response
+            # Pyannote API returns embeddings in their response format
+            if 'embedding' in result:
+                embedding = np.array(result['embedding'])
+            elif 'embeddings' in result:
+                # If multiple embeddings, average them
+                embeddings = np.array(result['embeddings'])
+                embedding = np.mean(embeddings, axis=0)
+            else:
+                # Fallback: try to parse the entire response as embedding
+                embedding = np.array(result)
+            
+            return embedding
+        else:
+            print(f"Pyannote API Error: {response.status_code}")
+            print(f"Response: {response.text}")
+            return None
+            
+    except Exception as e:
+        print(f"Error calling Pyannote API: {str(e)}")
         return None
 
 def calculate_similarity(embedding1, embedding2):
-    """Calculate cosine similarity between two embeddings"""
+    """Calculate cosine similarity"""
+    # Flatten embeddings if multi-dimensional
+    if len(embedding1.shape) > 1:
+        embedding1 = np.mean(embedding1, axis=0)
+    if len(embedding2.shape) > 1:
+        embedding2 = np.mean(embedding2, axis=0)
+    
+    # Ensure 1D arrays
+    embedding1 = embedding1.flatten()
+    embedding2 = embedding2.flatten()
+    
     return 1 - cosine(embedding1, embedding2)
 
 def process_sheet_file(file):
-    """Read CSV or Excel file and return DataFrame"""
+    """Read CSV or Excel file"""
     try:
         filename = file.filename.lower()
         
@@ -129,24 +161,14 @@ def process_sheet_file(file):
         return None
 
 def find_duplicates_from_urls(audio_urls, labels, threshold=0.30):
-    """
-    Find duplicate speakers from audio URLs using Pyannote (no disk storage)
-    
-    Args:
-        audio_urls: List of audio file URLs
-        labels: List of labels/identifiers for each audio
-        threshold: Similarity threshold (default 0.30 for same-script scenarios)
-    """
-    results = []
+    """Find duplicate speakers from audio URLs using Pyannote API"""
     embeddings = []
-    
     total = len(audio_urls)
     
-    # Extract embeddings for all audio files (in-memory only)
+    # Extract embeddings
     for idx, (url, label) in enumerate(zip(audio_urls, labels)):
         print(f"Processing {idx+1}/{total}: {label}")
         
-        # Download audio to memory
         audio_buffer = download_audio_to_memory(url)
         if audio_buffer is None:
             embeddings.append({
@@ -157,10 +179,8 @@ def find_duplicates_from_urls(audio_urls, labels, threshold=0.30):
             })
             continue
         
-        # Extract embedding using Pyannote
-        embedding = extract_embedding_pyannote_memory(audio_buffer)
+        embedding = extract_embedding_pyannote_api(audio_buffer)
         
-        # Clear memory buffer
         audio_buffer.close()
         del audio_buffer
         
@@ -168,7 +188,7 @@ def find_duplicates_from_urls(audio_urls, labels, threshold=0.30):
             'label': label,
             'url': url,
             'embedding': embedding,
-            'error': None if embedding is not None else 'Processing failed'
+            'error': None if embedding is not None else 'API processing failed'
         })
     
     # Compare all pairs
@@ -192,7 +212,6 @@ def find_duplicates_from_urls(audio_urls, labels, threshold=0.30):
                 group.append(file2['label'])
                 processed.add(j)
             
-            # Store comparison if similarity is significant
             if similarity >= (threshold - 0.1):
                 all_comparisons.append({
                     'file1': file1['label'],
@@ -210,7 +229,6 @@ def find_duplicates_from_urls(audio_urls, labels, threshold=0.30):
         
         processed.add(i)
     
-    # Count unique speakers
     unique_speakers = total - sum(group['count'] - 1 for group in duplicate_groups)
     
     return {
@@ -218,7 +236,7 @@ def find_duplicates_from_urls(audio_urls, labels, threshold=0.30):
         'unique_speakers': unique_speakers,
         'duplicate_groups': duplicate_groups,
         'all_comparisons': sorted(all_comparisons, key=lambda x: x['similarity'], reverse=True),
-        'method': 'Pyannote',
+        'method': 'Pyannote.ai API',
         'threshold': threshold,
         'errors': [e for e in embeddings if e['error'] is not None]
     }
@@ -229,7 +247,7 @@ def index():
 
 @app.route('/upload-sheet', methods=['POST'])
 def upload_sheet():
-    """Handle CSV/Excel upload and validate"""
+    """Handle CSV/Excel upload"""
     if 'sheet_file' not in request.files:
         return jsonify({'error': 'No file uploaded'}), 400
     
@@ -239,18 +257,15 @@ def upload_sheet():
         return jsonify({'error': 'No file selected'}), 400
     
     if not allowed_file(file.filename):
-        return jsonify({'error': 'Invalid file format. Use CSV or Excel'}), 400
+        return jsonify({'error': 'Invalid file format'}), 400
     
-    # Read sheet into DataFrame (memory only)
     df = process_sheet_file(file)
     
     if df is None:
         return jsonify({'error': 'Failed to read file'}), 400
     
-    # Validate required columns
     columns = df.columns.tolist()
     
-    # Check for audio URL column (flexible naming)
     url_column = None
     for col in columns:
         if any(keyword in col.lower() for keyword in ['url', 'link', 'audio', 'file']):
@@ -259,18 +274,16 @@ def upload_sheet():
     
     if url_column is None:
         return jsonify({
-            'error': 'No URL column found. Sheet must contain a column with "url", "link", "audio", or "file" in the name',
+            'error': 'No URL column found',
             'columns': columns
         }), 400
     
-    # Check for label column (optional)
     label_column = None
     for col in columns:
         if any(keyword in col.lower() for keyword in ['label', 'name', 'id', 'speaker']):
             label_column = col
             break
     
-    # Extract data
     audio_urls = df[url_column].dropna().tolist()
     
     if label_column:
@@ -279,31 +292,29 @@ def upload_sheet():
         labels = [f"Audio_{i+1}" for i in range(len(audio_urls))]
     
     if len(audio_urls) == 0:
-        return jsonify({'error': 'No audio URLs found in sheet'}), 400
+        return jsonify({'error': 'No audio URLs found'}), 400
     
     return jsonify({
         'message': f'{len(audio_urls)} audio URLs loaded successfully',
         'total_files': len(audio_urls),
         'url_column': url_column,
         'label_column': label_column or 'Auto-generated',
-        'sample_urls': audio_urls[:3]  # Show first 3 as preview
+        'sample_urls': audio_urls[:3]
     })
 
 @app.route('/analyze-from-sheet', methods=['POST'])
 def analyze_from_sheet():
-    """Analyze audio from sheet URLs using Pyannote (no disk storage)"""
+    """Analyze audio from sheet URLs using Pyannote API"""
     if 'sheet_file' not in request.files:
         return jsonify({'error': 'No file uploaded'}), 400
     
     file = request.files['sheet_file']
     threshold = float(request.form.get('threshold', 0.30))
     
-    # Read sheet
     df = process_sheet_file(file)
     if df is None:
         return jsonify({'error': 'Failed to read file'}), 400
     
-    # Find URL column
     url_column = None
     for col in df.columns:
         if any(keyword in col.lower() for keyword in ['url', 'link', 'audio', 'file']):
@@ -313,26 +324,22 @@ def analyze_from_sheet():
     if url_column is None:
         return jsonify({'error': 'No URL column found'}), 400
     
-    # Find label column
     label_column = None
     for col in df.columns:
         if any(keyword in col.lower() for keyword in ['label', 'name', 'id', 'speaker']):
             label_column = col
             break
     
-    # Extract data
     audio_urls = df[url_column].dropna().tolist()
     labels = df[label_column].dropna().tolist() if label_column else [f"Audio_{i+1}" for i in range(len(audio_urls))]
     
     if len(audio_urls) < 2:
-        return jsonify({'error': 'At least 2 audio URLs required for comparison'}), 400
+        return jsonify({'error': 'At least 2 audio URLs required'}), 400
     
-    # Validate Pyannote API key
     if not PYANNOTE_API_KEY:
-        return jsonify({'error': 'Pyannote API key not configured in environment variables'}), 400
+        return jsonify({'error': 'Pyannote API key not configured'}), 400
     
     try:
-        # Process all audio (in-memory only)
         results = find_duplicates_from_urls(audio_urls, labels, threshold)
         return jsonify(results)
     except Exception as e:
@@ -340,10 +347,10 @@ def analyze_from_sheet():
 
 @app.route('/health')
 def health():
-    """Health check endpoint"""
+    """Health check"""
     return jsonify({
         'status': 'healthy',
-        'pyannote_available': PYANNOTE_API_KEY is not None
+        'pyannote_api_available': PYANNOTE_API_KEY is not None
     })
 
 if __name__ == '__main__':
